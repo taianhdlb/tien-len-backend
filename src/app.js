@@ -4,11 +4,15 @@ import cors from 'cors';
 import { Server } from 'socket.io';
 import * as tienlen from './tienlen/game.js';
 import * as monopoly from './monopoly.js';
+import * as horse from './horse.js';
 
 const GAMES = {
   tienlen: { module: tienlen, event: 'tienlen:state' },
-  monopoly: { module: monopoly, event: 'monopoly:state' }
+  monopoly: { module: monopoly, event: 'monopoly:state' },
+  horse: { module: horse, event: 'horse:state' }
 };
+
+const isGameError = (err) => Object.values(GAMES).some(({ module }) => err instanceof module.GameError);
 
 const sanitizeRoomId = (raw) =>
   String(raw || '')
@@ -37,14 +41,15 @@ export function createGameServer({ corsOrigin = '*', graceMs = { WAITING: 10_000
   function broadcast(key) {
     const room = rooms.get(key);
     if (!room) return;
-    const game = key.startsWith('tienlen:') ? 'tienlen' : 'monopoly';
-    if (game === 'monopoly') {
-      io.to(key).emit(GAMES.monopoly.event, room);
+    const game = key.split(':')[0];
+    if (!GAMES[game]) return;
+    if (!GAMES[game].module.viewFor) {
+      io.to(key).emit(GAMES[game].event, room);
       return;
     }
     for (const socket of io.sockets.adapter.rooms.get(key) ?? []) {
       const s = io.sockets.sockets.get(socket);
-      if (s) s.emit(GAMES.tienlen.event, tienlen.viewFor(room, s.data.session?.playerId));
+      if (s) s.emit(GAMES[game].event, GAMES[game].module.viewFor(room, s.data.session?.playerId));
     }
   }
 
@@ -112,16 +117,19 @@ export function createGameServer({ corsOrigin = '*', graceMs = { WAITING: 10_000
         fn();
         ack?.({ ok: true });
       } catch (err) {
-        if (!(err instanceof tienlen.GameError) && !(err instanceof monopoly.GameError)) console.error(err);
+        if (!isGameError(err)) console.error(err);
         ack?.({ ok: false, error: err instanceof Error ? err.message : 'Lỗi không xác định' });
       }
     };
 
     const withRoom = (game, fn) => {
+      const fail = (message) => {
+        throw new GAMES[game].module.GameError(message);
+      };
       const session = socket.data.session;
-      if (!session || session.game !== game) throw new monopoly.GameError('Bạn chưa vào phòng.');
+      if (!session || session.game !== game) fail('Bạn chưa vào phòng.');
       const room = rooms.get(session.key);
-      if (!room) throw new monopoly.GameError('Phòng không còn tồn tại.');
+      if (!room) fail('Phòng không còn tồn tại.');
       fn(room, session.playerId);
       broadcast(session.key);
     };
@@ -130,8 +138,8 @@ export function createGameServer({ corsOrigin = '*', graceMs = { WAITING: 10_000
       respond(ack, () => {
         const roomId = sanitizeRoomId(payload?.roomId);
         const playerId = sanitizeId(payload?.playerId);
-        if (!roomId) throw new monopoly.GameError('Mã phòng không hợp lệ.');
-        if (!playerId) throw new monopoly.GameError('Thiếu mã người chơi.');
+        if (!roomId) throw new GAMES[game].module.GameError('Mã phòng không hợp lệ.');
+        if (!playerId) throw new GAMES[game].module.GameError('Thiếu mã người chơi.');
 
         const key = roomKey(game, roomId);
         const { module } = GAMES[game];
@@ -177,6 +185,19 @@ export function createGameServer({ corsOrigin = '*', graceMs = { WAITING: 10_000
         } catch (err) {
           const session = socket.data.session;
           if (session && rooms.has(session.key)) socket.emit('monopoly:state', rooms.get(session.key));
+          throw err;
+        }
+      })
+    );
+
+    socket.on('horse:join', (payload, ack) => joinGame('horse', payload, ack));
+    socket.on('horse:submit', (payload, ack) =>
+      respond(ack, () => {
+        try {
+          withRoom('horse', (room, pid) => horse.applyState(room, pid, payload?.state));
+        } catch (err) {
+          const session = socket.data.session;
+          if (session && rooms.has(session.key)) socket.emit('horse:state', rooms.get(session.key));
           throw err;
         }
       })
