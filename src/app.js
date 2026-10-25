@@ -3,14 +3,20 @@ import http from 'node:http';
 import cors from 'cors';
 import { Server } from 'socket.io';
 import * as tienlen from './tienlen/game.js';
+import * as phom from './phom/game.js';
 import * as monopoly from './monopoly.js';
 import * as horse from './horse.js';
 
 const GAMES = {
   tienlen: { module: tienlen, event: 'tienlen:state' },
+  phom: { module: phom, event: 'phom:state' },
   monopoly: { module: monopoly, event: 'monopoly:state' },
   horse: { module: horse, event: 'horse:state' }
 };
+
+// Tiến Lên và Phỏm dùng chung một tab "Đánh Bài" nhưng là hai chiếu riêng.
+const SIBLINGS = { tienlen: 'phom', phom: 'tienlen' };
+const MODE_LABEL = { tienlen: 'Tiến Lên', phom: 'Phỏm' };
 
 const isGameError = (err) => Object.values(GAMES).some(({ module }) => err instanceof module.GameError);
 
@@ -142,6 +148,12 @@ export function createGameServer({ corsOrigin = '*', graceMs = { WAITING: 10_000
         if (!playerId) throw new GAMES[game].module.GameError('Thiếu mã người chơi.');
 
         const key = roomKey(game, roomId);
+        const sibling = SIBLINGS[game];
+        if (sibling && !rooms.has(key) && rooms.has(roomKey(sibling, roomId))) {
+          throw new GAMES[game].module.GameError(
+            `Mã ${roomId} đang mở ở chế độ ${MODE_LABEL[sibling]}. Hãy chuyển chế độ rồi vào lại.`
+          );
+        }
         const { module } = GAMES[game];
         const room = rooms.get(key) ?? module.createRoom(roomId);
         module.join(room, { playerId, name: payload?.name, classId: payload?.classId });
@@ -176,6 +188,10 @@ export function createGameServer({ corsOrigin = '*', graceMs = { WAITING: 10_000
       respond(ack, () => withRoom('tienlen', (room, pid) => tienlen.play(room, pid, payload?.cardIds)))
     );
     socket.on('tienlen:pass', (_payload, ack) => respond(ack, () => withRoom('tienlen', (room, pid) => tienlen.pass(room, pid))));
+
+    socket.on('phom:join', (payload, ack) => joinGame('phom', payload, ack));
+    socket.on('phom:start', (_payload, ack) => respond(ack, () => withRoom('phom', (room, pid) => phom.start(room, pid))));
+    socket.on('phom:action', (payload, ack) => respond(ack, () => withRoom('phom', (room, pid) => phom.act(room, pid, payload))));
 
     socket.on('monopoly:join', (payload, ack) => joinGame('monopoly', payload, ack));
     socket.on('monopoly:submit', (payload, ack) =>
